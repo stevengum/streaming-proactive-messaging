@@ -2,8 +2,10 @@ import { config } from 'dotenv';
 import * as path from 'path';
 import * as restify from 'restify';
 
-import { CloudAdapter, ConfigurationBotFrameworkAuthentication } from 'botbuilder';
+import { CloudAdapter, ConfigurationBotFrameworkAuthentication, ConversationReference } from 'botbuilder';
+import { ConnectorClient, ConnectorFactory } from 'botframework-connector';
 import { EchoBot } from './bot';
+import { QueueClient } from '@azure/storage-queue';
 
 const ENV_FILE = path.join(__dirname, '..', '.env');
 config({ path: ENV_FILE });
@@ -38,8 +40,8 @@ const onTurnErrorHandler = async (context, error) => {
 
 adapter.onTurnError = onTurnErrorHandler;
 
-const conversationReferences = {};
-const myBot = new EchoBot(conversationReferences);
+const queueIdMap: Record<string, [ConversationReference, ConnectorFactory, ConnectorClient]> = {};
+const myBot = new EchoBot(queueIdMap, process.env.AZURE_STORAGE_CONNECTION_STRING, process.env.WEB_CHAT_BOT_ENDPOINT);
 
 server.post('/api/messages', (req, res) => {
     adapter.process(req, res, async (context) => {
@@ -58,29 +60,50 @@ server.get('/', restify.plugins.serveStatic({
     file: 'index.html'
 }));
 
-server.get('/api/notify', async (req, res) => {
-    for (const conversationReference of Object.values(conversationReferences)) {
-        await adapter.continueConversation(conversationReference, async turnContext => {
-            await turnContext.sendActivity('proactive hello');
-        });
-    }
-    res.setHeader('Content-Type', 'text/html');
-    res.writeHead(200);
-    res.write('<html><body><h1>Proactive messages have been sent.</h1></body></html>');
-    res.end();
-});
+// Using an endpoint to trigger a fetch of messages from Azure Queue Storage.
+// In production-level scenarios, a background task would run on set intervals
+// to dequeue messages and proactively send messages to the end users over
+// streaming connections.
+server.get('/api/dequeue', async (_, res) => {
+    const messagesToSend = Object.entries(queueIdMap).map(async ([queueId, [convRef, connectorFactory, connectorClient]]) => {
+        return new Promise<void>(async (resolve, _reject) => {
+            const queueClient = new QueueClient(process.env.AZURE_STORAGE_CONNECTION_STRING, queueId);
+            const { receivedMessageItems: items } = await queueClient.receiveMessages();
+            console.log(`Number of items dequeued: ${items.length}`);
 
-server.post('/api/notify', async (req, res) => {
-    for (var prop in req.body) {
-        var msg = req.body[prop];
-        for (const conversationReference of Object.values(conversationReferences)) {
-            await adapter.continueConversation(conversationReference, async turnContext => {
-                await turnContext.sendActivity(msg);
-            });
-        }
+            if (!items.length) {
+                resolve();
+            } else {
+                resolve(adapter.continueConversationAsync(process.env.MicrosoftAppId, convRef, async (context) => {
+                    context.turnState.set(adapter.ConnectorClientKey, connectorClient);
+                    context.turnState.set(adapter.ConnectorFactoryKey, connectorFactory);
+    
+                    await Promise.all(
+                        items.map(
+                            (item) => new Promise(
+                                (innerResolve, _innerReject) => {
+                                    const proactiveMessage = JSON.parse(item.messageText);
+                                    innerResolve(context.sendActivity(proactiveMessage));
+                            })
+                        )
+                    );
+                    })
+                );
+            }
+        });
+    });
+
+    try {
+        await Promise.all(messagesToSend);
+        res.setHeader('Content-Type', 'text/html');
+        res.writeHead(200);
+        res.write('<html><body><h1>Proactive messages have been sent.</h1></body></html>');
+        res.end();
+    } catch (err) {
+        console.error(err);
+
+        res.writeHead(500);
+        res.write(`<html><body><h1>Error dequeueing messages: "${(err as Error).message}"</h1></body></html>`);
+        res.end();
     }
-    res.setHeader('Content-Type', 'text/html');
-    res.writeHead(200);
-    res.write('Proactive messages have been sent.');
-    res.end();
 });
