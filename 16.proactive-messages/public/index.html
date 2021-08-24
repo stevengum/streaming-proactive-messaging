@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en-US">
+  <head>
+    <title>Web Chat: Proactive Messages with Direct Line Speech</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script crossorigin="anonymous" src="https://cdn.botframework.com/botframework-webchat/latest/webchat.js"></script>
+    <style>
+      html,
+      body {
+        height: 100%;
+      }
+
+      body {
+        margin: 0;
+      }
+
+      #webchat {
+        height: 100%;
+        width: 100%;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="webchat" role="main"></div>
+    <script>
+      (async function () {
+        const fetchCredentials = async () => {
+          const res = await fetch('https://westus.api.cognitive.microsoft.com/sts/v1.0/issuetoken', {
+            method: 'POST',
+            headers: {
+                'Ocp-Apim-Subscription-Key': ''
+            }
+          });
+
+          if (!res.ok) {
+            throw new Error('Failed to fetch authorization token and region.');
+          }
+
+          const authorizationToken = await res.text();
+
+          return { authorizationToken, region: 'westus' };
+        };
+
+        const adapters = await window.WebChat.createDirectLineSpeechAdapters({
+          fetchCredentials
+        });
+
+        window.WebChat.renderWebChat(
+          {
+            ...adapters
+          },
+          document.getElementById('webchat')
+        );
+
+        document.querySelector('#webchat > *').focus();
+      })().catch(err => console.error(err));
+    </script>
+  </body>
+</html>
